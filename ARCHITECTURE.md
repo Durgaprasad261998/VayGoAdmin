@@ -140,17 +140,35 @@ yet** — both are deferred follow-ups.
 ## 2. VayGoUser — Passenger app (`VayGoUser/VayGoUser`)
 
 - Ionic 8 + Angular 20 (standalone components), Capacitor for Android.
-- `src/app/`: `home/`, `login/`.
+- `src/app/`: `home/`, `login/`, `otp/`, `register/`, `registration/`.
 - `src/environments/environment.ts` / `environment.prod.ts`:
   ```ts
   baseUrl: 'https://vaygotech-afhdbqfde5b0gkh0.centralindia-01.azurewebsites.net/api'
   userType: 'USER'
+  googleMapsApiKey: '...'
   ```
 - `src/app/services/api.ts` — `ApiService` wrapper (same `get/post/put/delete` pattern as
   VayGoRider), plus attaches `Authorization: Bearer <token>` from `localStorage.token` when present.
+- `src/app/services/auth.service.ts` — wraps `ApiService` for `auth/send-otp` / `auth/verify-otp`
+  (`userType: 'user'`), persists `token`/`userData` to `localStorage` on verify, plus `logout()`/`isLoggedIn()`.
+- `src/app/services/maps.service.ts` — Google Distance Matrix / Places Autocomplete / Place Details /
+  Directions / Geocoding wrappers, keyed off `environment.googleMapsApiKey`. Currently unused by
+  `home/` (which uses Leaflet + OSM tiles + SignalR instead) — ported from the old prototype for
+  parity but not wired into the live booking flow.
 - `src/app/services/signalr.ts` — `SignalrService` connects to `/hubs/notifications?userId=<id>`
   (dev-mode id from `localStorage.userId`, default `1`) and exposes RxJS subjects:
   `rideAccepted$`, `rideCancelled$`, `rideStarted$`, `rideCompleted$`, `driverLocationUpdate$`.
+- **Two parallel auth/onboarding paths** (both present, intentionally not merged):
+  - **Real path** (`login` → `otp` → `register` → `home`): `login.page` calls
+    `AuthService.sendOtp`, `otp.page` calls `AuthService.verifyOtp` against the live
+    `AuthController`; a verified user with no `fullName` yet is sent to `register.page`,
+    which `PUT user/update-profile`s the real backend before landing on `home`.
+  - **Dummy path** (`registration` → `registration/otp` → `registration/step2`), reachable via
+    "Create New Account" on the login screen: collects name/mobile/gender/referral locally
+    (`RegistrationStateService`), gates on a **hardcoded OTP `123456`**, captures a profile
+    photo via `@capacitor/camera`, then just redirects to `/login` — **none of this step hits
+    the backend**. Ported verbatim from the old prototype (`VayGoUserOLD`) at the user's request;
+    not real onboarding, just dormant/demo UI.
 - `home/` page is the full booking flow: Leaflet map (pickup from geolocation, drop via map tap),
   `GET ride/vehicle-types` grid grouped by category (Bike/Auto/Car) with fare + nearby-driver count,
   `POST ride/request` to book, then live state machine
@@ -165,11 +183,18 @@ yet** — both are deferred follow-ups.
   baseUrl: 'https://vaygotech-afhdbqfde5b0gkh0.centralindia-01.azurewebsites.net/api'
   userType: 'RIDER'
   ```
-- `src/app/services/api.ts` — thin `ApiService` wrapper over `HttpClient` (`get/post/put/delete`, JSON headers, base URL from environment). **This is the pattern copied into VayGoAdmin.**
+- `src/app/services/api.ts` — thin `ApiService` wrapper over `HttpClient` (`get/post/put/delete`, JSON headers,
+  base URL from environment, attaches `Authorization: Bearer <token>` from `localStorage.token` when present).
+  **This is the pattern copied into VayGoAdmin.**
+- `src/app/services/auth.service.ts` — wraps `ApiService` for `auth/send-otp` / `auth/verify-otp`
+  (`userType: 'rider'`), persists `token`/`userData` to `localStorage`, plus `logout()`/`isLoggedIn()`.
 - Routes (`app.routes.ts`, lazy-loaded standalone pages):
-  - `login` → mobile number → `otp`
-  - `otp` → OTP verification
-  - `registration` (driver onboarding, multi-step):
+  - `login` → mobile number → `otp`. **Now wired to the real backend** (previously both pages
+    were pure UI with a hardcoded OTP and no API calls at all): `login.page` calls
+    `AuthService.sendOtp`, `otp.page` calls `AuthService.verifyOtp`; a returning driver with a
+    `fullName` already set goes to `home`, a brand-new one goes to `registration`.
+  - `registration` (driver onboarding, multi-step) — **unchanged, still uses its own dummy OTP**
+    (`reg-otp.page`, hardcoded `123456`) separate from the top-level login OTP above:
     - `registration` (start) → `registration/otp` → `step2` → `step3` → `step4` → `payment`
     - has its own `registration-state.service.ts` to carry state across steps
     - `step3`/`step4` correspond to KYC + vehicle document uploads (`RiderController` `upload-documents` / `upload-file`), `payment` corresponds to `SubscriptionController.create-order`
@@ -225,9 +250,29 @@ state that **VayGoAdmin's "pending drivers" review/approve/reject screen** opera
    than reinventing it.
 3. **Auth is OTP-based**, not username/password: `send-otp` → `verify-otp` returns JWT
    access + refresh tokens. `LoginRequest` (email/password) exists as a model but the
-   controllers use the OTP flow.
+   controllers use the OTP flow. As of the latest pass, **both VayGoUser's and VayGoRider's
+   top-level `login`/`otp` pages actually call this real flow** via each app's
+   `services/auth.service.ts` — previously they were disconnected UI shells (VayGoRider's
+   OTP step in particular just checked against a hardcoded `123456`). The driver app's
+   deeper `registration/` onboarding flow (KYC/vehicle docs/payment) still uses its own
+   separate dummy OTP and is not yet wired to `RiderController`/`SubscriptionController`.
 4. **CORS is wide open (`AllowAll`)** and `AdminController`'s role check is currently
    disabled — both should be tightened before production use of the admin dashboard.
 5. **SMS and payment-gateway integration are deferred** — the ride-booking workflow
    (request → match → accept/reject → start → end) is fully wired end-to-end via
    SignalR, but no SMS notifications or payment capture happen yet.
+6. **Two retired prototype repos exist** alongside the live apps, kept for reference only:
+   - `VayGoUserOLD` — an earlier, more complete passenger-app prototype. Its
+     `User_registerPage` branch was the source for VayGoUser's `auth.service.ts`,
+     `register`/`registration` pages, and `maps.service.ts` (ported in this pass).
+     Its `environment.prod.ts` has a **real Google Maps API key committed in plaintext**
+     in git history — rotate/restrict it if this repo is ever pushed anywhere shared.
+   - `VayGoRaiderOLD` — a much earlier, abandoned driver-app prototype (email/password
+     login, no backend wiring at all, no OTP/registration/services). Fully superseded
+     by the current VayGoRider app; nothing in it is worth porting.
+7. **Ionic dark-mode CSS pitfall**: leaving `@import '@ionic/angular/css/palettes/dark.system.css';`
+   uncommented in `global.scss` makes `ion-item`/`ion-input` render with a dark/near-black
+   background on devices with system dark mode on, clashing with the apps' custom white
+   `.card` panels (visible as "black fields" on login/OTP/registration forms). VayGoRider's
+   `global.scss` already had this commented out; VayGoUser's did not and was fixed to match.
+   Keep this commented out in any new frontend built off this pattern.
